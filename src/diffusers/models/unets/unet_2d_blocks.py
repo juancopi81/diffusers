@@ -318,6 +318,18 @@ def get_mid_block(
             resnet_time_scale_shift=resnet_time_scale_shift,
             add_attention=False,
         )
+    elif mid_block_type == "MidBlock2D":
+        return MidBlock2D(
+            in_channels=in_channels,
+            temb_channels=temb_channels,
+            dropout=dropout,
+            resnet_eps=resnet_eps,
+            resnet_act_fn=resnet_act_fn,
+            output_scale_factor=output_scale_factor,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+            resnet_groups=resnet_groups,
+            use_linear_projection=use_linear_projection,
+        )
     elif mid_block_type is None:
         return None
     else:
