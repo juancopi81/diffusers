@@ -33,6 +33,7 @@ if is_torch_available():
     _import_structure["autoencoders.consistency_decoder_vae"] = ["ConsistencyDecoderVAE"]
     _import_structure["autoencoders.vq_model"] = ["VQModel"]
     _import_structure["controlnet"] = ["ControlNetModel"]
+    _import_structure["brushnet"] = ["BrushNetModel"]
     _import_structure["controlnet_xs"] = ["ControlNetXSAdapter", "UNetControlNetXSModel"]
     _import_structure["embeddings"] = ["ImageProjection"]
     _import_structure["modeling_utils"] = ["ModelMixin"]
@@ -73,6 +74,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             ConsistencyDecoderVAE,
             VQModel,
         )
+        from .brushnet import BrushNetModel
         from .controlnet import ControlNetModel
         from .controlnet_xs import ControlNetXSAdapter, UNetControlNetXSModel
         from .embeddings import ImageProjection

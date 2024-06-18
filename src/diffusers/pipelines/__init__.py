@@ -19,6 +19,7 @@ from ..utils import (
 # These modules contain pipelines from multiple libraries/frameworks
 _dummy_objects = {}
 _import_structure = {
+    "brushnet": [],
     "controlnet": [],
     "controlnet_xs": [],
     "deprecated": [],
@@ -125,6 +126,12 @@ else:
         "AudioLDM2UNet2DConditionModel",
     ]
     _import_structure["blip_diffusion"] = ["BlipDiffusionPipeline"]
+    _import_structure["brushnet"].extend(
+        [
+            "StableDiffusionBrushNetPipeline",
+            "StableDiffusionXLBrushNetPipeline",
+        ]
+    )
     _import_structure["controlnet"].extend(
         [
             "BlipDiffusionControlNetPipeline",
@@ -385,6 +392,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             AudioLDM2UNet2DConditionModel,
         )
         from .blip_diffusion import BlipDiffusionPipeline
+        from .brushnet import StableDiffusionBrushNetPipeline
         from .controlnet import (
             BlipDiffusionControlNetPipeline,
             StableDiffusionControlNetImg2ImgPipeline,
