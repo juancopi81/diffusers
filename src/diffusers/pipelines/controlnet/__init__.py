@@ -24,6 +24,7 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["multicontrolnet"] = ["MultiControlNetModel"]
     _import_structure["pipeline_controlnet"] = ["StableDiffusionControlNetPipeline"]
+    _import_structure["pipeline_controlnet_brushnet"] = ["StableDiffusionControlNetBrushNetPipeline"]
     _import_structure["pipeline_controlnet_blip_diffusion"] = ["BlipDiffusionControlNetPipeline"]
     _import_structure["pipeline_controlnet_img2img"] = ["StableDiffusionControlNetImg2ImgPipeline"]
     _import_structure["pipeline_controlnet_inpaint"] = ["StableDiffusionControlNetInpaintPipeline"]
