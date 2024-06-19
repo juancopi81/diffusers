@@ -1118,7 +1118,6 @@ class StableDiffusionControlNetBrushNetPipeline(
         self.check_inputs(
             prompt,
             control_image,
-            image,
             mask,
             callback_steps,
             negative_prompt,
@@ -1130,8 +1129,7 @@ class StableDiffusionControlNetBrushNetPipeline(
             controlnet_conditioning_scale,
             control_guidance_start,
             control_guidance_end,
-            callback_on_step_end_tensor_inputs,
-            padding_mask_crop
+            callback_on_step_end_tensor_inputs
         )
 
         self._guidance_scale = guidance_scale
