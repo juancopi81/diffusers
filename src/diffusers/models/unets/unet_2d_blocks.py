@@ -1346,6 +1346,7 @@ class CrossAttnDownBlock2D(nn.Module):
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         additional_residuals: Optional[torch.Tensor] = None,
+        down_block_add_samples: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
@@ -1397,11 +1398,17 @@ class CrossAttnDownBlock2D(nn.Module):
             if i == len(blocks) - 1 and additional_residuals is not None:
                 hidden_states = hidden_states + additional_residuals
 
+            if down_block_add_samples is not None:
+                hidden_states = hidden_states + down_block_add_samples.pop(0) 
+            
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
                 hidden_states = downsampler(hidden_states)
+
+            if down_block_add_samples is not None:
+                hidden_states = hidden_states + down_block_add_samples.pop(0) # todo: add before or after
 
             output_states = output_states + (hidden_states,)
 
@@ -1461,7 +1468,7 @@ class DownBlock2D(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(
-        self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None, *args, **kwargs
+        self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None, down_block_add_samples: Optional[torch.FloatTensor] = None, *args, **kwargs
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
@@ -1489,6 +1496,9 @@ class DownBlock2D(nn.Module):
             else:
                 hidden_states = resnet(hidden_states, temb)
 
+            if down_block_add_samples is not None:
+                hidden_states = hidden_states + down_block_add_samples.pop(0)
+            
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
@@ -2588,6 +2598,8 @@ class CrossAttnUpBlock2D(nn.Module):
         upsample_size: Optional[int] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
+        return_res_samples: Optional[bool]=False,
+        up_block_add_samples: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
@@ -2599,6 +2611,8 @@ class CrossAttnUpBlock2D(nn.Module):
             and getattr(self, "b1", None)
             and getattr(self, "b2", None)
         )
+        if return_res_samples:
+            output_states=()
 
         for resnet, attn in zip(self.resnets, self.attentions):
             # pop res hidden states
@@ -2655,12 +2669,23 @@ class CrossAttnUpBlock2D(nn.Module):
                     encoder_attention_mask=encoder_attention_mask,
                     return_dict=False,
                 )[0]
+            if return_res_samples:
+                output_states = output_states + (hidden_states,)
+            if up_block_add_samples is not None:
+                hidden_states = hidden_states + up_block_add_samples.pop(0)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)
+            if return_res_samples:
+                output_states = output_states + (hidden_states,)
+            if up_block_add_samples is not None:
+                hidden_states = hidden_states + up_block_add_samples.pop(0)
 
-        return hidden_states
+        if return_res_samples:
+            return hidden_states, output_states
+        else:
+            return hidden_states
 
 
 class UpBlock2D(nn.Module):
@@ -2719,6 +2744,8 @@ class UpBlock2D(nn.Module):
         res_hidden_states_tuple: Tuple[torch.Tensor, ...],
         temb: Optional[torch.Tensor] = None,
         upsample_size: Optional[int] = None,
+        return_res_samples: Optional[bool]=False,
+        up_block_add_samples: Optional[torch.FloatTensor] = None,
         *args,
         **kwargs,
     ) -> torch.Tensor:
@@ -2732,6 +2759,8 @@ class UpBlock2D(nn.Module):
             and getattr(self, "b1", None)
             and getattr(self, "b2", None)
         )
+        if return_res_samples:
+            output_states = ()
 
         for resnet in self.resnets:
             # pop res hidden states
@@ -2770,12 +2799,25 @@ class UpBlock2D(nn.Module):
                     )
             else:
                 hidden_states = resnet(hidden_states, temb)
+            
+            if return_res_samples:
+                output_states = output_states + (hidden_states,)
+            if up_block_add_samples is not None:
+                hidden_states = hidden_states + up_block_add_samples.pop(0)  # todo: add before or after
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)
 
-        return hidden_states
+            if return_res_samples:
+                output_states = output_states + (hidden_states,)
+            if up_block_add_samples is not None:
+                hidden_states = hidden_states + up_block_add_samples.pop(0)  # todo: add before or after
+
+        if return_res_samples:
+            return hidden_states, output_states
+        else:
+            return hidden_states
 
 
 class UpDecoderBlock2D(nn.Module):
