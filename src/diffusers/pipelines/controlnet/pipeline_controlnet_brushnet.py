@@ -611,7 +611,7 @@ class StableDiffusionControlNetBrushNetPipeline(
             or is_compiled
             and isinstance(self.controlnet._orig_mod, ControlNetModel)
         ):
-            self.check_image(image, prompt, prompt_embeds)
+            self.check_image(image, mask, prompt, prompt_embeds)
         elif (
             isinstance(self.controlnet, MultiControlNetModel)
             or is_compiled
@@ -629,14 +629,14 @@ class StableDiffusionControlNetBrushNetPipeline(
                         f"For multiple controlnets: if you pass`image` as a list of list, each sublist must have the same length as the number of controlnets, but the sublists in `image` got {len(transposed_image)} images and {len(self.controlnet.nets)} ControlNets."
                     )
                 for image_ in transposed_image:
-                    self.check_image(image_, prompt, prompt_embeds)
+                    self.check_image(image_, mask, prompt, prompt_embeds)
             elif len(image) != len(self.controlnet.nets):
                 raise ValueError(
                     f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.nets)} ControlNets."
                 )
             else:
                 for image_ in image:
-                    self.check_image(image_, prompt, prompt_embeds)
+                    self.check_image(image_, mask, prompt, prompt_embeds)
         else:
             assert False
 
