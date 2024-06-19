@@ -883,10 +883,6 @@ class BrushNetModel(ModelMixin, ConfigMixin):
                     upsample_size=upsample_size,
                     return_res_samples=True
                 )
-            
-            print(f"type(up_res_samples) {type(up_res_samples)}")
-            if not isinstance(up_res_samples, tuple):
-                up_res_samples = (up_res_samples,)
 
             up_block_res_samples += up_res_samples
 
