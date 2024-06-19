@@ -9,7 +9,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPV
 
 from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...loaders import FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
-from ...models import AutoencoderKL, BrushNetModel, ImageProjection, UNet2DConditionModel
+from ...models import AutoencoderKL, BrushNetModel, ControlNetModel, ImageProjection, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import (
@@ -24,6 +24,7 @@ from ...utils.torch_utils import is_compiled_module, is_torch_version, randn_ten
 from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from ..stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
 from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+from .multicontrolnet import MultiControlNetModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -114,6 +115,10 @@ class StableDiffusionControlNetBrushNetPipeline(
             A `UNet2DConditionModel` to denoise the encoded image latents.
         brushnet ([`BrushNetModel`]`):
             Provides additional conditioning to the `unet` during the denoising process.
+        controlnet ([`ControlNetModel`] or `List[ControlNetModel]`):
+            Provides additional conditioning to the `unet` during the denoising process. If you set multiple
+            ControlNets as a list, the outputs from each ControlNet are added together to create one combined
+            additional conditioning.
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
@@ -137,6 +142,7 @@ class StableDiffusionControlNetBrushNetPipeline(
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
         brushnet: BrushNetModel,
+        controlnet: Union[ControlNetModel, List[ControlNetModel], Tuple[ControlNetModel], MultiControlNetModel],
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
@@ -161,12 +167,16 @@ class StableDiffusionControlNetBrushNetPipeline(
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
 
+        if isinstance(controlnet, (list, tuple)):
+            controlnet = MultiControlNetModel(controlnet)
+        
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
             unet=unet,
             brushnet=brushnet,
+            controlnet=controlnet,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
@@ -525,6 +535,7 @@ class StableDiffusionControlNetBrushNetPipeline(
         ip_adapter_image=None,
         ip_adapter_image_embeds=None,
         brushnet_conditioning_scale=1.0,
+        controlnet_conditioning_scale=1.0,
         control_guidance_start=0.0,
         control_guidance_end=1.0,
         callback_on_step_end_tensor_inputs=None,
@@ -592,6 +603,72 @@ class StableDiffusionControlNetBrushNetPipeline(
         else:
             assert False
 
+        is_compiled = hasattr(F, "scaled_dot_product_attention") and isinstance(
+            self.controlnet, torch._dynamo.eval_frame.OptimizedModule
+        )
+        if (
+            isinstance(self.controlnet, ControlNetModel)
+            or is_compiled
+            and isinstance(self.controlnet._orig_mod, ControlNetModel)
+        ):
+            self.check_image(image, prompt, prompt_embeds)
+        elif (
+            isinstance(self.controlnet, MultiControlNetModel)
+            or is_compiled
+            and isinstance(self.controlnet._orig_mod, MultiControlNetModel)
+        ):
+            if not isinstance(image, list):
+                raise TypeError("For multiple controlnets: `image` must be type `list`")
+
+            # When `image` is a nested list:
+            # (e.g. [[canny_image_1, pose_image_1], [canny_image_2, pose_image_2]])
+            elif any(isinstance(i, list) for i in image):
+                transposed_image = [list(t) for t in zip(*image)]
+                if len(transposed_image) != len(self.controlnet.nets):
+                    raise ValueError(
+                        f"For multiple controlnets: if you pass`image` as a list of list, each sublist must have the same length as the number of controlnets, but the sublists in `image` got {len(transposed_image)} images and {len(self.controlnet.nets)} ControlNets."
+                    )
+                for image_ in transposed_image:
+                    self.check_image(image_, prompt, prompt_embeds)
+            elif len(image) != len(self.controlnet.nets):
+                raise ValueError(
+                    f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.nets)} ControlNets."
+                )
+            else:
+                for image_ in image:
+                    self.check_image(image_, prompt, prompt_embeds)
+        else:
+            assert False
+
+        # Check `controlnet_conditioning_scale`
+        if (
+            isinstance(self.controlnet, ControlNetModel)
+            or is_compiled
+            and isinstance(self.controlnet._orig_mod, ControlNetModel)
+        ):
+            if not isinstance(controlnet_conditioning_scale, float):
+                raise TypeError("For single controlnet: `controlnet_conditioning_scale` must be type `float`.")
+        elif (
+            isinstance(self.controlnet, MultiControlNetModel)
+            or is_compiled
+            and isinstance(self.controlnet._orig_mod, MultiControlNetModel)
+        ):
+            if isinstance(controlnet_conditioning_scale, list):
+                if any(isinstance(i, list) for i in controlnet_conditioning_scale):
+                    raise ValueError(
+                        "A single batch of varying conditioning scale settings (e.g. [[1.0, 0.5], [0.2, 0.8]]) is not supported at the moment. "
+                        "The conditioning scale must be fixed across the batch."
+                    )
+            elif isinstance(controlnet_conditioning_scale, list) and len(controlnet_conditioning_scale) != len(
+                self.controlnet.nets
+            ):
+                raise ValueError(
+                    "For multiple controlnets: When `controlnet_conditioning_scale` is specified as `list`, it must have"
+                    " the same length as the number of controlnets"
+                )
+        else:
+            assert False
+
         if not isinstance(control_guidance_start, (tuple, list)):
             control_guidance_start = [control_guidance_start]
 
@@ -602,6 +679,12 @@ class StableDiffusionControlNetBrushNetPipeline(
             raise ValueError(
                 f"`control_guidance_start` has {len(control_guidance_start)} elements, but `control_guidance_end` has {len(control_guidance_end)} elements. Make sure to provide the same number of elements to each list."
             )
+
+        if isinstance(self.controlnet, MultiControlNetModel):
+            if len(control_guidance_start) != len(self.controlnet.nets):
+                raise ValueError(
+                    f"`control_guidance_start`: {control_guidance_start} has {len(control_guidance_start)} elements but there are {len(self.controlnet.nets)} controlnets available. Make sure to provide {len(self.controlnet.nets)}."
+                )
 
         for start, end in zip(control_guidance_start, control_guidance_end):
             if start >= end:
@@ -714,6 +797,40 @@ class StableDiffusionControlNetBrushNetPipeline(
 
         return image
 
+    def prepare_control_image(
+        self,
+        image,
+        width,
+        height,
+        batch_size,
+        num_images_per_prompt,
+        device,
+        dtype,
+        crops_coords,
+        resize_mode,
+        do_classifier_free_guidance=False,
+        guess_mode=False,
+    ):
+        image = self.control_image_processor.preprocess(
+            image, height=height, width=width, crops_coords=crops_coords, resize_mode=resize_mode
+        ).to(dtype=torch.float32)
+        image_batch_size = image.shape[0]
+
+        if image_batch_size == 1:
+            repeat_by = batch_size
+        else:
+            # image batch size is the same as prompt batch size
+            repeat_by = num_images_per_prompt
+
+        image = image.repeat_interleave(repeat_by, dim=0)
+
+        image = image.to(device=device, dtype=dtype)
+
+        if do_classifier_free_guidance and not guess_mode:
+            image = torch.cat([image] * 2)
+
+        return image
+
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
@@ -791,8 +908,10 @@ class StableDiffusionControlNetBrushNetPipeline(
         prompt: Union[str, List[str]] = None,
         image: PipelineImageInput = None,
         mask: PipelineImageInput = None,
+        control_image: PipelineImageInput = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
+        padding_mask_crop: Optional[int] = None,
         num_inference_steps: int = 50,
         timesteps: List[int] = None,
         guidance_scale: float = 7.5,
@@ -809,6 +928,7 @@ class StableDiffusionControlNetBrushNetPipeline(
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         brushnet_conditioning_scale: Union[float, List[float]] = 1.0,
+        controlnet_conditioning_scale: Union[float, List[float]] = 0.5,
         guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
@@ -843,10 +963,25 @@ class StableDiffusionControlNetBrushNetPipeline(
                 input to a single BrushNet. When `prompt` is a list, and if a list of images is passed for a single BrushNet,
                 each will be paired with each prompt in the `prompt` list. This also applies to multiple BrushNets,
                 where a list of image lists can be passed to batch for each prompt and each BrushNet.
+            control_image (`torch.Tensor`, `PIL.Image.Image`, `List[torch.Tensor]`, `List[PIL.Image.Image]`,
+                    `List[List[torch.Tensor]]`, or `List[List[PIL.Image.Image]]`):
+                The ControlNet input condition to provide guidance to the `unet` for generation. If the type is
+                specified as `torch.Tensor`, it is passed to ControlNet as is. `PIL.Image.Image` can also be accepted
+                as an image. The dimensions of the output image defaults to `image`'s dimensions. If height and/or
+                width are passed, `image` is resized accordingly. If multiple ControlNets are specified in `init`,
+                images must be passed as a list such that each element of the list can be correctly batched for input
+                to a single ControlNet.
             height (`int`, *optional*, defaults to `self.unet.config.sample_size * self.vae_scale_factor`):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to `self.unet.config.sample_size * self.vae_scale_factor`):
                 The width in pixels of the generated image.
+            padding_mask_crop (`int`, *optional*, defaults to `None`):
+                The size of margin in the crop to be applied to the image and masking. If `None`, no crop is applied to
+                image and mask_image. If `padding_mask_crop` is not `None`, it will first find a rectangular region
+                with the same aspect ration of the image and contains all masked area, and then expand that area based
+                on `padding_mask_crop`. The image and mask_image will then be cropped based on the expanded area before
+                resizing to the original image size for inpainting. This is useful when the masked area is small while
+                the image is large and contain information irrelevant for inpainting, such as background.
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
@@ -902,6 +1037,10 @@ class StableDiffusionControlNetBrushNetPipeline(
                 The outputs of the BrushNet are multiplied by `brushnet_conditioning_scale` before they are added
                 to the residual in the original `unet`. If multiple BrushNets are specified in `init`, you can set
                 the corresponding scale as a list.
+            controlnet_conditioning_scale (`float` or `List[float]`, *optional*, defaults to 0.5):
+                The outputs of the ControlNet are multiplied by `controlnet_conditioning_scale` before they are added
+                to the residual in the original `unet`. If multiple ControlNets are specified in `init`, you can set
+                the corresponding scale as a list.
             guess_mode (`bool`, *optional*, defaults to `False`):
                 The BrushNet encoder tries to recognize the content of the input image even if you remove all
                 prompts. A `guidance_scale` value between 3.0 and 5.0 is recommended.
@@ -950,6 +1089,20 @@ class StableDiffusionControlNetBrushNetPipeline(
 
         brushnet = self.brushnet._orig_mod if is_compiled_module(self.brushnet) else self.brushnet
 
+        controlnet = self.controlnet._orig_mod if is_compiled_module(self.controlnet) else self.controlnet
+
+        # align format for control guidance
+        if not isinstance(control_guidance_start, list) and isinstance(control_guidance_end, list):
+            control_guidance_start = len(control_guidance_end) * [control_guidance_start]
+        elif not isinstance(control_guidance_end, list) and isinstance(control_guidance_start, list):
+            control_guidance_end = len(control_guidance_start) * [control_guidance_end]
+        elif not isinstance(control_guidance_start, list) and not isinstance(control_guidance_end, list):
+            mult = len(controlnet.nets) if isinstance(controlnet, MultiControlNetModel) else 1
+            control_guidance_start, control_guidance_end = (
+                mult * [control_guidance_start],
+                mult * [control_guidance_end],
+            )
+
         # align format for control guidance
         if not isinstance(control_guidance_start, list) and isinstance(control_guidance_end, list):
             control_guidance_start = len(control_guidance_end) * [control_guidance_start]
@@ -964,6 +1117,7 @@ class StableDiffusionControlNetBrushNetPipeline(
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
+            control_image,
             image,
             mask,
             callback_steps,
@@ -973,9 +1127,11 @@ class StableDiffusionControlNetBrushNetPipeline(
             ip_adapter_image,
             ip_adapter_image_embeds,
             brushnet_conditioning_scale,
+            controlnet_conditioning_scale,
             control_guidance_start,
             control_guidance_end,
             callback_on_step_end_tensor_inputs,
+            padding_mask_crop
         )
 
         self._guidance_scale = guidance_scale
@@ -990,7 +1146,18 @@ class StableDiffusionControlNetBrushNetPipeline(
         else:
             batch_size = prompt_embeds.shape[0]
 
+        if padding_mask_crop is not None:
+            height, width = self.image_processor.get_default_height_width(image, height, width)
+            crops_coords = self.mask_processor.get_crop_region(mask, width, height, pad=padding_mask_crop)
+            resize_mode = "fill"
+        else:
+            crops_coords = None
+            resize_mode = "default"
+
         device = self._execution_device
+
+        if isinstance(controlnet, MultiControlNetModel) and isinstance(controlnet_conditioning_scale, float):
+            controlnet_conditioning_scale = [controlnet_conditioning_scale] * len(controlnet.nets)
 
         global_pool_conditions = (
             brushnet.config.global_pool_conditions
@@ -1029,7 +1196,7 @@ class StableDiffusionControlNetBrushNetPipeline(
                 self.do_classifier_free_guidance,
             )
 
-        # 4. Prepare image
+        # 4a. Prepare image
         if isinstance(brushnet, BrushNetModel):
             image = self.prepare_image(
                 image=image,
@@ -1055,6 +1222,45 @@ class StableDiffusionControlNetBrushNetPipeline(
             )
             original_mask=(original_mask.sum(1)[:,None,:,:] < 0).to(image.dtype)
             height, width = image.shape[-2:]
+        else:
+            assert False
+
+        # 4a. Prepare control_image
+        if isinstance(controlnet, ControlNetModel):
+            control_image = self.prepare_control_image(
+                image=control_image,
+                width=width,
+                height=height,
+                batch_size=batch_size * num_images_per_prompt,
+                num_images_per_prompt=num_images_per_prompt,
+                device=device,
+                dtype=controlnet.dtype,
+                crops_coords=crops_coords,
+                resize_mode=resize_mode,
+                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                guess_mode=guess_mode,
+            )
+        elif isinstance(controlnet, MultiControlNetModel):
+            control_images = []
+
+            for control_image_ in control_image:
+                control_image_ = self.prepare_control_image(
+                    image=control_image_,
+                    width=width,
+                    height=height,
+                    batch_size=batch_size * num_images_per_prompt,
+                    num_images_per_prompt=num_images_per_prompt,
+                    device=device,
+                    dtype=controlnet.dtype,
+                    crops_coords=crops_coords,
+                    resize_mode=resize_mode,
+                    do_classifier_free_guidance=self.do_classifier_free_guidance,
+                    guess_mode=guess_mode,
+                )
+
+                control_images.append(control_image_)
+
+            control_image = control_images
         else:
             assert False
 
@@ -1114,6 +1320,15 @@ class StableDiffusionControlNetBrushNetPipeline(
             ]
             brushnet_keep.append(keeps[0] if isinstance(brushnet, BrushNetModel) else keeps)
 
+        # 7.2(a) Create tensor stating which controlnets to keep
+        controlnet_keep = []
+        for i in range(len(timesteps)):
+            keeps = [
+                1.0 - float(i / len(timesteps) < s or (i + 1) / len(timesteps) > e)
+                for s, e in zip(control_guidance_start, control_guidance_end)
+            ]
+            controlnet_keep.append(keeps[0] if isinstance(controlnet, ControlNetModel) else keeps)
+    
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         is_unet_compiled = is_compiled_module(self.unet)
@@ -1135,9 +1350,11 @@ class StableDiffusionControlNetBrushNetPipeline(
                     control_model_input = latents
                     control_model_input = self.scheduler.scale_model_input(control_model_input, t)
                     brushnet_prompt_embeds = prompt_embeds.chunk(2)[1]
+                    controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
                 else:
                     control_model_input = latent_model_input
                     brushnet_prompt_embeds = prompt_embeds
+                    controlnet_prompt_embeds = prompt_embeds
 
                 if isinstance(brushnet_keep[i], list):
                     cond_scale = [c * s for c, s in zip(brushnet_conditioning_scale, brushnet_keep[i])]
@@ -1147,11 +1364,29 @@ class StableDiffusionControlNetBrushNetPipeline(
                         brushnet_cond_scale = brushnet_cond_scale[0]
                     cond_scale = brushnet_cond_scale * brushnet_keep[i]
 
+                if isinstance(controlnet_keep[i], list):
+                    cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+                else:
+                    controlnet_cond_scale = controlnet_conditioning_scale
+                    if isinstance(controlnet_cond_scale, list):
+                        controlnet_cond_scale = controlnet_cond_scale[0]
+                    cond_scale = controlnet_cond_scale * controlnet_keep[i]
+
                 down_block_res_samples, mid_block_res_sample, up_block_res_samples = self.brushnet(
                     control_model_input,
                     t,
                     encoder_hidden_states=brushnet_prompt_embeds,
                     brushnet_cond=conditioning_latents,
+                    conditioning_scale=cond_scale,
+                    guess_mode=guess_mode,
+                    return_dict=False,
+                )
+
+                down_block_res_samples_cn, mid_block_res_sample_cn = self.controlnet(
+                    control_model_input,
+                    t,
+                    encoder_hidden_states=controlnet_prompt_embeds,
+                    controlnet_cond=control_image,
                     conditioning_scale=cond_scale,
                     guess_mode=guess_mode,
                     return_dict=False,
@@ -1172,6 +1407,8 @@ class StableDiffusionControlNetBrushNetPipeline(
                     encoder_hidden_states=prompt_embeds,
                     timestep_cond=timestep_cond,
                     cross_attention_kwargs=self.cross_attention_kwargs,
+                    down_block_additional_residuals=down_block_res_samples_cn,
+                    mid_block_additional_residual=mid_block_res_sample_cn,
                     down_block_add_samples=down_block_res_samples,
                     mid_block_add_sample=mid_block_res_sample,
                     up_block_add_samples=up_block_res_samples,
@@ -1209,6 +1446,7 @@ class StableDiffusionControlNetBrushNetPipeline(
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.unet.to("cpu")
             self.brushnet.to("cpu")
+            self.controlnet.to("cpu")
             torch.cuda.empty_cache()
 
         if not output_type == "latent":
